@@ -39,11 +39,9 @@ void SWDAnalyzerResults::GetBubbleText(const Frame& f, DisplayBase display_base,
 {
 	results.clear();
 
-	std::string result;
-
 	if (f.mType == SWDFT_Request)
 	{
-		SWDRequestFrame& req((SWDRequestFrame&) f);
+		const SWDRequestFrame& req = static_cast< SWDRequestFrame& >( const_cast< Frame& >( f ) );
 
 		std::string addr_str(int2str_sal(req.GetAddr(), display_base, 4));
 		std::string reg_name(req.GetRegisterName());
@@ -223,7 +221,7 @@ void SWDAnalyzerResults::GenerateExportFile(const char* file, DisplayBase displa
 				record.push_back("FAULT");
 			else
 				record.push_back("<disc>");
-			
+
 		} else if (f.mType == SWDFT_WData) {
 
 			record.push_back(int2str_sal(f.mData1, display_base, 32));

@@ -67,7 +67,7 @@ void SWDAnalyzer::WorkerThread()
 			mResults->CommitResults();
 
 		} else {
-			
+
 			// This is neither a valid transaction nor a valid reset,
 			// so remove the first bit and try again.
 			// We're dropping the error bit into oblivion.
@@ -108,7 +108,7 @@ const char* SWDAnalyzer::GetAnalyzerName() const
 
 const char* GetAnalyzerName()
 {
-	return "SWD";
+	return "SWD-Fixed";
 }
 
 Analyzer* CreateAnalyzer()

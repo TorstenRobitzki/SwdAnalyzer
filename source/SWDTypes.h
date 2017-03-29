@@ -58,6 +58,11 @@ enum SWDACK
 	ACK_FAULT	= 4,
 };
 
+enum class edge {
+	rising,
+	falling
+};
+
 // this is the basic token of the analyzer
 // objects of this type are buffered in SWDOperation
 struct SWDBit
@@ -70,9 +75,9 @@ struct SWDBit
 	S64			falling;
 	S64			low_end;
 
-	bool IsHigh(bool is_rising = true) const
+	bool IsHigh( edge e ) const
 	{
-		return (is_rising ? state_rising : state_falling) == BIT_HIGH;
+		return ( e == edge::rising ? state_rising : state_falling ) == BIT_HIGH;
 	}
 
 	S64 GetMinStartEnd() const;

@@ -10,9 +10,9 @@
 #include "SWDTypes.h"
 #include "SWDUtils.h"
 
-const int TRAN_REQ_AND_ACK = 8 + 1 + 3;					// request/turnaround/ACK
-const int TRAN_READ_LENGTH = TRAN_REQ_AND_ACK + 33;		// previous + 32bit data + parity
-const int TRAN_WRITE_LENGTH = TRAN_READ_LENGTH + 1;		// previous + one bit for turnaround
+static const int TRAN_REQ_AND_ACK  = 8 + 1 + 3;					// request/turnaround/ACK
+static const int TRAN_READ_LENGTH  = TRAN_REQ_AND_ACK + 33 + 1;	// header plus data plus additional turn
+static const int TRAN_WRITE_LENGTH = TRAN_READ_LENGTH;
 
 S64 SWDBit::GetMinStartEnd() const
 {
@@ -80,14 +80,20 @@ void SWDOperation::AddFrames(SWDAnalyzerResults* pResults)
 	req.mType = SWDFT_Request;
 	pResults->AddFrame(req);
 
-	// turnaround
-	f = bits[8].MakeFrame();
+	const auto& turn_bit = bits[ 8 ];
+
+	f.mFlags = 0;
 	f.mType = SWDFT_Turnaround;
+	f.mStartingSampleInclusive = turn_bit.GetStartSample();
+	f.mEndingSampleInclusive = turn_bit.rising + 1;
+	f.mData1 = turn_bit.state_rising == BIT_HIGH ? 1 : 0;
+	f.mData2 = 0;
+
 	pResults->AddFrame(f);
 
 	// ack
-	f.mStartingSampleInclusive = bits[9].GetStartSample();
-	f.mEndingSampleInclusive = bits[11].GetEndSample();
+	f.mStartingSampleInclusive = bits[ 8 ].falling - 1;
+	f.mEndingSampleInclusive = bits[ 10 ].GetEndSample();
 	f.mType = SWDFT_ACK;
 	f.mData1 = ACK;
 	pResults->AddFrame(f);
@@ -96,10 +102,10 @@ void SWDOperation::AddFrames(SWDAnalyzerResults* pResults)
 		return;
 
 	// turnaround
-	std::vector<SWDBit>::iterator bi(bits.begin() + 12);
+	std::vector<SWDBit>::iterator bi = std::next( bits.begin() + 10 );
 	if (!IsRead())
 	{
-		f = bits[12].MakeFrame();
+		f = bi->MakeFrame();
 		f.mType = SWDFT_Turnaround;
 		pResults->AddFrame(f);
 		bi++;
@@ -121,6 +127,19 @@ void SWDOperation::AddFrames(SWDAnalyzerResults* pResults)
 	pResults->AddFrame(f);
 
 	bi += 33;
+
+	if ( IsRead() )
+	{
+		f.mFlags = 0;
+		f.mType = SWDFT_Turnaround;
+		f.mStartingSampleInclusive = bi->GetStartSample();
+		f.mEndingSampleInclusive = bi->GetEndSample();
+		f.mData1 = turn_bit.state_rising == BIT_HIGH ? 1 : 0;
+		f.mData2 = 0;
+
+		pResults->AddFrame(f);
+		bi++;
+	}
 
 	// do we have trailing bits?
 	if (bi < bits.end())
@@ -144,20 +163,31 @@ void SWDOperation::AddMarkers(SWDAnalyzerResults* pResults)
 		int ndx = bi - bits.begin();
 
 		// turnaround
-		if (ndx == 8  ||  ndx == 12  &&  !IsRead())
+		if (ndx == 8  ||  ndx == 11  &&  !IsRead())
+		{
+			assert( bi->rising <= bi->falling  );
+			pResults->AddMarker((bi->falling + bi->rising) / 2,
+								AnalyzerResults::X,
+								pResults->GetSettings()->mSWCLK);
+
+			pResults->AddMarker(bi->falling,
+								bi->state_falling == BIT_HIGH ? AnalyzerResults::One : AnalyzerResults::Zero,
+								pResults->GetSettings()->mSWCLK);
+		}
+		else if ( ndx == 11  &&  !IsRead())
 			pResults->AddMarker((bi->falling + bi->rising) / 2,
 								AnalyzerResults::X,
 								pResults->GetSettings()->mSWCLK);
 
 		// write
-		else if (ndx < 8  ||  ndx > 12  &&  !IsRead())
-			pResults->AddMarker(bi->falling,
-								bi->state_falling == BIT_HIGH ? AnalyzerResults::One : AnalyzerResults::Zero,
+		else if (ndx < 8  ||  ndx > 11  &&  !IsRead() || ndx > 33 + 8 + 3 )
+			pResults->AddMarker(bi->rising,
+								bi->state_rising == BIT_HIGH ? AnalyzerResults::One : AnalyzerResults::Zero,
 								pResults->GetSettings()->mSWCLK);
 		// read
 		else
-			pResults->AddMarker(bi->rising,
-								bi->state_rising == BIT_HIGH ? AnalyzerResults::One : AnalyzerResults::Zero,
+			pResults->AddMarker(bi->falling,
+								bi->state_falling == BIT_HIGH ? AnalyzerResults::One : AnalyzerResults::Zero,
 								pResults->GetSettings()->mSWCLK);
 	}
 }
@@ -246,15 +276,6 @@ SWDBit SWDParser::ParseBit()
 	mSWCLK->AdvanceToNextEdge();
 	mSWDIO->AdvanceToAbsPosition(mSWCLK->GetSampleNumber());
 
-	/*
-	// go to the rising egde
-	mSWCLK->AdvanceToNextEdge();
-	mSWDIO->AdvanceToAbsPosition(mSWCLK->GetSampleNumber());
-
-	rbit.rising = mSWCLK->GetSampleNumber();
-	rbit.state_rising = mSWDIO->GetBitState();
-	*/
-
 	// go to the falling edge
 	mSWCLK->AdvanceToNextEdge();
 	mSWDIO->AdvanceToAbsPosition(mSWCLK->GetSampleNumber());
@@ -298,7 +319,7 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 	for (size_t cnt = 0; cnt < 8; ++cnt)
 	{
 		tran.request_byte >>= 1;
-		tran.request_byte |= (mBitsBuffer[cnt].IsHigh() ? 0x80 : 0);
+		tran.request_byte |= (mBitsBuffer[cnt].IsHigh( edge::rising ) ? 0x80 : 0);
 	}
 
 	// are the request's constant bits (start, stop & park) wrong?
@@ -306,11 +327,11 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 		return false;
 
 	// get the indivitual bits
-	tran.APnDP = (tran.request_byte & 0x02) != 0;	//(mBitsBuffer[1].state_falling == BIT_HIGH);
-	tran.RnW = (tran.request_byte & 0x04) != 0;		//(mBitsBuffer[2].state_falling == BIT_HIGH);
-	tran.addr = (tran.request_byte & 0x18) >> 1;	//(mBitsBuffer[3].state_falling == BIT_HIGH ? (1<<2) : 0)
-													//| (mBitsBuffer[4].state_falling == BIT_HIGH ? (1<<3) : 0);
-	tran.parity_read = ((tran.request_byte & 0x20) != 0 ? 1 : 0);	//(mBitsBuffer[5].state_falling == BIT_HIGH ? 1 : 0);
+	tran.APnDP = (tran.request_byte & 0x02) != 0;
+	tran.RnW   = (tran.request_byte & 0x04) != 0;
+	tran.addr  = (tran.request_byte & 0x18) >> 1;
+
+	tran.parity_read = ((tran.request_byte & 0x20) != 0 ? 1 : 0);
 
 	// check parity
 	int check =   (mBitsBuffer[1].state_rising == BIT_HIGH ? 1 : 0)
@@ -326,9 +347,9 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 	tran.SetRegister(mSelectRegister);
 
 	// get the ACK value
-	tran.ACK = (mBitsBuffer[9].state_rising == BIT_HIGH ? 1 : 0)
-				+ (mBitsBuffer[10].state_rising == BIT_HIGH ? 2 : 0)
-				+ (mBitsBuffer[11].state_rising == BIT_HIGH ? 4 : 0);
+	tran.ACK = (mBitsBuffer[8].state_falling == BIT_HIGH ? 1 : 0)
+				+ (mBitsBuffer[9].state_falling == BIT_HIGH ? 2 : 0)
+				+ (mBitsBuffer[10].state_falling == BIT_HIGH ? 4 : 0);
 
 	// we're only handling OK, WAIT and FAULT responses
 	if (tran.ACK == ACK_WAIT  ||  tran.ACK == ACK_FAULT)
@@ -349,24 +370,23 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 	BufferBits(TRAN_READ_LENGTH);
 
 	// turnaround if write operation
-	bool read_rising = true;
-	std::vector<SWDBit>::iterator bi(mBitsBuffer.begin() + 12);
+	edge sampling_edge = edge::falling;
+	std::vector<SWDBit>::iterator bi = std::next(mBitsBuffer.begin(), 11);
 	if (!tran.IsRead())
 	{
 		BufferBits(TRAN_WRITE_LENGTH);
 		++bi;
-		// !!! read_rising = false;
+		++bi;
+		sampling_edge = edge::rising;
 	}
 
 	// read the data
-	tran.data = 0;
 	check = 0;
-	size_t ndx;
-	for (ndx = 0; ndx < 32; ndx++)
+	for (size_t ndx = 0; ndx < 32; ndx++, ++bi)
 	{
 		tran.data >>= 1;
 
-		if (bi[ndx].IsHigh(read_rising))
+		if (bi->IsHigh( sampling_edge ))
 		{
 			tran.data |= 0x80000000;
 			++check;
@@ -374,8 +394,8 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 	}
 
 	// data parity
-	tran.data_parity = bi[ndx].IsHigh(read_rising) ? 1 : 0;
-
+	tran.data_parity = bi->IsHigh(sampling_edge) ? 1 : 0;
+	++bi;
 	tran.data_parity_ok = (tran.data_parity == (check & 1));
 
 	if (!tran.data_parity_ok)
@@ -385,19 +405,14 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 	if (tran.reg == SWDR_DP_SELECT  &&  !tran.RnW)
 		mSelectRegister = tran.data;
 
-	// buffered trailing zeros
-	++ndx;
-	bool all_zeros = true;
-	while (bi + ndx < mBitsBuffer.end())
-	{
-		if (bi[ndx].IsHigh(read_rising))
-		{
-			all_zeros = false;
-			break;
-		}
+	// trailing turn
+	if ( tran.IsRead() )
+		++bi;
 
-		++ndx;
-	}
+	// buffered trailing zeros
+	bool all_zeros = true;
+	for ( ; bi < mBitsBuffer.end() && all_zeros; ++bi )
+		all_zeros = !bi->IsHigh(edge::rising);
 
 	// if we haven't seen a high bit carry on until we do
 	if (all_zeros)
@@ -407,7 +422,7 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 		while (1)
 		{
 			bit = ParseBit();
-			if (bit.IsHigh(read_rising))
+			if (bit.IsHigh(edge::rising))
 				break;
 
 			mBitsBuffer.push_back(bit);
@@ -424,10 +439,10 @@ bool SWDParser::IsOperation(SWDOperation& tran)
 
 		// copy this operation's bits
 		tran.bits.clear();
-		std::copy(mBitsBuffer.begin(), mBitsBuffer.begin() + ndx, std::back_inserter(tran.bits));
+		tran.bits.insert(tran.bits.begin(), mBitsBuffer.begin(), bi);
 
 		// remove this operation's bits from the buffer
-		mBitsBuffer.erase(mBitsBuffer.begin(), mBitsBuffer.begin() + ndx);
+		mBitsBuffer.erase(mBitsBuffer.begin(), bi);
 	}
 
 	return true;
@@ -444,7 +459,7 @@ bool SWDParser::IsLineReset(SWDLineReset& reset)
 			mBitsBuffer.push_back(ParseBit());
 
 		// we can't have a low bit
-		if (!mBitsBuffer[cnt].IsHigh())
+		if (!mBitsBuffer[cnt].IsHigh(edge::rising))
 			return false;
 	}
 
@@ -452,7 +467,7 @@ bool SWDParser::IsLineReset(SWDLineReset& reset)
 	while (true)
 	{
 		bit = ParseBit();
-		if (!bit.IsHigh())
+		if (!bit.IsHigh(edge::rising))
 			break;
 
 		mBitsBuffer.push_back(bit);
